@@ -1,0 +1,131 @@
+lua_package_path "/etc/nginx/nginx-jwt/?.lua;;";
+
+
+{{ range $host, $containers := groupByMulti $ "Env.VIRTUAL_HOST" "," }}
+upstream {{ $host }} {
+
+{{ range $index, $value := $containers }}
+
+	{{ $addrLen := len $value.Addresses }}
+	{{ $network := index $value.Networks 0 }}
+	
+	{{/* If only 1 port exposed, use that */}}
+	{{ if eq $addrLen 1 }}
+		{{ with $address := index $value.Addresses 0 }}
+			# {{$value.Name}}
+			server {{ $network.IP }}:{{ $address.Port }};
+		{{ end }}
+
+	{{/* If more than one port exposed, use the one matching VIRTUAL_PORT env var */}}
+	{{ else if $value.Env.VIRTUAL_PORT }}
+		{{ range $i, $address := $value.Addresses }}
+			{{ if eq $address.Port $value.Env.VIRTUAL_PORT }}
+			# {{$value.Name}}
+			server {{ $network.IP }}:{{ $address.Port }};
+			{{ end }}
+		{{ end }}
+
+	{{/* Else default to standard web port 80 */}}
+	{{ else }}
+		{{ range $i, $address := $value.Addresses }}
+			{{ if eq $address.Port "80" }}
+			# {{$value.Name}}
+			server {{ $network.IP }}:{{ $address.Port }};
+			{{ end }}
+		{{ end }}
+	{{ end }}
+{{ end }}
+  # The keepalive parameter sets the maximum number of idle keepalive connections
+                  # to upstream servers that are preserved in the cache of each worker process. When
+                  # this number is exceeded, the least recently used connections are closed.
+                  #keepalive 100;
+
+}
+
+server {
+
+	gzip_types text/plain text/css application/json application/x-javascript text/xml application/xml application/xml+rss text/javascript;
+        listen 1880 default_server;
+        listen [::]:1880 default_server;     
+	server_name {{ $host }};
+	proxy_buffering off;
+	error_log  /usr/local/openresty/nginx/logs/error.log;
+        error_log  /usr/local/openresty/nginx/logs/error.log notice;
+        error_log  /usr/local/openresty/nginx/logs/error.log info;
+	access_log /usr/local/openresty/nginx/logs/access.log main;
+    
+    {{ range $index, $value := $containers }}
+	
+	{{$containerId := $value.ID }}
+	## Container Id => {{$containerId}}
+    ## Container Name => {{$value.Name}}
+
+	{{ $addrLen := len $value.Addresses }}
+	{{ $network := index $value.Networks 0 }}
+	
+	 {{/* If only 1 port exposed, use that */}}
+	 {{ if eq $addrLen 1 }}
+	  {{ with $address := index $value.Addresses 0 }}
+
+            location /{{$containerId}}/nodered/ws {
+            rewrite ^/{{$containerId}}/nodered(.*) $1 break;
+            access_by_lua '
+                local jwt = require("nginx-jwt")
+                jwt.set("{{$containerId}}")
+                jwt.auth()
+            ';
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 10800;
+            proxy_connect_timeout 10800;
+            proxy_pass http://{{ $network.IP }}:{{ $address.Port }};
+        }
+
+
+            location /{{$containerId}}/nodered {
+            rewrite ^/{{$containerId}}/nodered(.*) $1 break;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	    proxy_pass http://{{ $network.IP }}:{{ $address.Port }};
+        }
+
+	    location /{{$containerId}}/nodered/dashboard {
+            ##rewrite ^/{{$containerId}}/nodered(.*) $1 break;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_pass http://{{ $network.IP }}:{{ $address.Port }}/dashboard;
+        }
+
+	{{ end }}
+
+	{{/* Else default to standard web port 80 */}}
+	{{ else }}
+		{{ range $i, $address := $value.Addresses }}
+			{{ if eq $address.Port "80" }}
+			location /{{$containerId}} {
+			    rewrite ^/{{$containerId}}(.*) $1 break;
+				proxy_pass http://{{ $network.IP }}:{{ $address.Port }};
+	    		proxy_http_version 1.1;
+        		proxy_set_header Upgrade $http_upgrade;
+        		proxy_set_header Connection "upgrade";
+        		proxy_set_header Host $host;
+			}
+			{{ end }}
+		{{ end }}
+	{{ end }}
+{{ end }}
+}
+
+{{ end }}
